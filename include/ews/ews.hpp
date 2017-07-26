@@ -6154,20 +6154,74 @@ namespace internal
             throw exception("Bad enum value");
         }
     }
+
+    struct response_result
+    {
+        response_class cls;
+        response_code code;
+        std::string message;
+
+        response_result(response_class cls_, response_code code_)
+            : cls(cls_), code(code_), message()
+        {
+        }
+
+        response_result(response_class cls_, response_code code_,
+                        std::string&& msg)
+            : cls(cls_), code(code_), message(std::move(msg))
+        {
+        }
+    };
 }
 
 //! Exception thrown when a request was not successful
 class exchange_error final : public exception
 {
 public:
+    //! Constructs an exchange_error from a <ResponseCode>.
     explicit exchange_error(response_code code)
         : exception(internal::enum_to_str(code)), code_(code)
     {
     }
 
+    //! \brief Constructs an exchange_error from a <ResponseCode> and
+    //! additional error message, e.g., from an <MessageText> element.
+    exchange_error(response_code code, const std::string& message_text)
+        : exception(message_text.empty()
+                        ? internal::enum_to_str(code)
+                        : sanitize(message_text) + " (" +
+                              internal::enum_to_str(code) + ")"),
+          code_(code)
+    {
+    }
+
+#ifndef EWS_DOXYGEN_SHOULD_SKIP_THIS
+    explicit exchange_error(const internal::response_result& res)
+        : exception(res.message.empty()
+                        ? internal::enum_to_str(res.code)
+                        : sanitize(res.message) + " (" +
+                              internal::enum_to_str(res.code) + ")"),
+          code_(res.code)
+    {
+    }
+#endif
+
     response_code code() const EWS_NOEXCEPT { return code_; }
 
 private:
+    std::string sanitize(const std::string& message_text)
+    {
+        // Remove trailing dot, if any
+        if (!message_text.empty() || message_text.back() == '.')
+        {
+            std::string tmp(message_text);
+            tmp.pop_back();
+            return tmp;
+        }
+
+        return message_text;
+    }
+
     response_code code_;
 };
 
@@ -8457,7 +8511,7 @@ static_assert(std::is_move_assignable<attachment>::value, "");
 namespace internal
 {
     // Parse response class and response code from given element.
-    inline std::pair<response_class, response_code>
+    inline response_result
     parse_response_class_and_code(const rapidxml::xml_node<>& elem)
     {
         using rapidxml::internal::compare;
@@ -8487,9 +8541,18 @@ namespace internal
                 uri<>::microsoft::messages(), "ResponseCode");
             EWS_ASSERT(response_code_elem && "Expected <ResponseCode> element");
             code = str_to_response_code(response_code_elem->value());
+
+            auto message_text_elem =
+                elem.first_node_ns(uri<>::microsoft::messages(), "MessageText");
+            if (message_text_elem)
+            {
+                return response_result(
+                    cls, code, std::string(message_text_elem->value(),
+                                           message_text_elem->value_size()));
+            }
         }
 
-        return std::make_pair(cls, code);
+        return response_result(cls, code);
     }
 
     // Iterate over <Items> array and execute given function for each node.
@@ -8513,23 +8576,20 @@ namespace internal
     class response_message_base
     {
     public:
-        response_message_base(response_class cls, response_code code)
-            : cls_(cls), code_(code)
+        explicit response_message_base(response_result&& res)
+            : res_(std::move(res))
         {
         }
 
-        response_class get_response_class() const EWS_NOEXCEPT { return cls_; }
+        const response_result& result() const EWS_NOEXCEPT { return res_; }
 
         bool success() const EWS_NOEXCEPT
         {
-            return get_response_class() == response_class::success;
+            return res_.cls == response_class::success;
         }
 
-        response_code get_response_code() const EWS_NOEXCEPT { return code_; }
-
     private:
-        response_class cls_;
-        response_code code_;
+        response_result res_;
     };
 
     // Base-class for response messages that contain an <Items> array.
@@ -8552,9 +8612,9 @@ namespace internal
     public:
         typedef ItemType item_type;
 
-        response_message_with_items(response_class cls, response_code code,
-                                    std::vector<item_type> items)
-            : response_message_base(cls, code), items_(std::move(items))
+        response_message_with_items(response_result&& res,
+                                    std::vector<item_type>&& items)
+            : response_message_base(std::move(res)), items_(std::move(items))
         {
         }
 
@@ -8575,9 +8635,10 @@ namespace internal
         static create_item_response_message parse(http_response&&);
 
     private:
-        create_item_response_message(response_class cls, response_code code,
-                                     std::vector<item_id> items)
-            : response_message_with_items<item_id>(cls, code, std::move(items))
+        create_item_response_message(response_result&& res,
+                                     std::vector<item_id>&& items)
+            : response_message_with_items<item_id>(std::move(res),
+                                                   std::move(items))
         {
         }
     };
@@ -8590,9 +8651,10 @@ namespace internal
         static find_item_response_message parse(http_response&&);
 
     private:
-        find_item_response_message(response_class cls, response_code code,
-                                   std::vector<item_id> items)
-            : response_message_with_items<item_id>(cls, code, std::move(items))
+        find_item_response_message(response_result&& res,
+                                   std::vector<item_id>&& items)
+            : response_message_with_items<item_id>(std::move(res),
+                                                   std::move(items))
         {
         }
     };
@@ -8602,13 +8664,12 @@ namespace internal
     {
     public:
         // implemented below
-        static find_calendar_item_response_message parse(http_response&);
+        static find_calendar_item_response_message parse(http_response&&);
 
     private:
-        find_calendar_item_response_message(response_class cls,
-                                            response_code code,
-                                            std::vector<calendar_item> items)
-            : response_message_with_items<calendar_item>(cls, code,
+        find_calendar_item_response_message(response_result&& res,
+                                            std::vector<calendar_item>&& items)
+            : response_message_with_items<calendar_item>(std::move(res),
                                                          std::move(items))
         {
         }
@@ -8622,9 +8683,10 @@ namespace internal
         static update_item_response_message parse(http_response&&);
 
     private:
-        update_item_response_message(response_class cls, response_code code,
-                                     std::vector<item_id> items)
-            : response_message_with_items<item_id>(cls, code, std::move(items))
+        update_item_response_message(response_result&& res,
+                                     std::vector<item_id>&& items)
+            : response_message_with_items<item_id>(std::move(res),
+                                                   std::move(items))
         {
         }
     };
@@ -8638,9 +8700,10 @@ namespace internal
         static get_item_response_message parse(http_response&&);
 
     private:
-        get_item_response_message(response_class cls, response_code code,
-                                  std::vector<ItemType> items)
-            : response_message_with_items<ItemType>(cls, code, std::move(items))
+        get_item_response_message(response_result&& res,
+                                  std::vector<ItemType>&& items)
+            : response_message_with_items<ItemType>(std::move(res),
+                                                    std::move(items))
         {
         }
     };
@@ -8713,9 +8776,10 @@ namespace internal
         }
 
     protected:
-        delegate_response_message(response_class cls, response_code code,
-                                  std::vector<delegate_user> delegates)
-            : response_message_base(cls, code), delegates_(std::move(delegates))
+        delegate_response_message(response_result&& res,
+                                  std::vector<delegate_user>&& delegates)
+            : response_message_base(std::move(res)),
+              delegates_(std::move(delegates))
         {
         }
 
@@ -8733,9 +8797,9 @@ namespace internal
         static add_delegate_response_message parse(http_response&&);
 
     private:
-        add_delegate_response_message(response_class cls, response_code code,
-                                      std::vector<delegate_user> delegates)
-            : delegate_response_message(cls, code, std::move(delegates))
+        add_delegate_response_message(response_result&& res,
+                                      std::vector<delegate_user>&& delegates)
+            : delegate_response_message(std::move(res), std::move(delegates))
         {
         }
     };
@@ -8747,9 +8811,9 @@ namespace internal
         static get_delegate_response_message parse(http_response&&);
 
     private:
-        get_delegate_response_message(response_class cls, response_code code,
-                                      std::vector<delegate_user> delegates)
-            : delegate_response_message(cls, code, std::move(delegates))
+        get_delegate_response_message(response_result&& res,
+                                      std::vector<delegate_user>&& delegates)
+            : delegate_response_message(std::move(res), std::move(delegates))
         {
         }
     };
@@ -8757,22 +8821,12 @@ namespace internal
     class remove_delegate_response_message final : public response_message_base
     {
     public:
-        static remove_delegate_response_message parse(http_response&& response)
-        {
-            const auto doc = parse_response(std::move(response));
-            auto elem = get_element_by_qname(*doc, "RemoveDelegateResponse",
-                                             uri<>::microsoft::messages());
-            EWS_ASSERT(elem &&
-                       "Expected <RemoveDelegateResponse>, got nullptr");
-
-            const auto cls_and_code = parse_response_class_and_code(*elem);
-            return remove_delegate_response_message(cls_and_code.first,
-                                                    cls_and_code.second);
-        }
+        // defined below
+        static remove_delegate_response_message parse(http_response&&);
 
     private:
-        remove_delegate_response_message(response_class cls, response_code code)
-            : response_message_base(cls, code)
+        explicit remove_delegate_response_message(response_result&& res)
+            : response_message_base(std::move(res))
         {
         }
     };
@@ -8793,7 +8847,7 @@ namespace internal
                 elem &&
                 "Expected <CreateAttachmentResponseMessage>, got nullptr");
 
-            const auto cls_and_code = parse_response_class_and_code(*elem);
+            auto result = parse_response_class_and_code(*elem);
 
             auto attachments_element = elem->first_node_ns(
                 uri<>::microsoft::messages(), "Attachments");
@@ -8811,8 +8865,8 @@ namespace internal
                 ids.emplace_back(
                     attachment_id::from_xml_element(*attachment_id_elem));
             }
-            return create_attachment_response_message(
-                cls_and_code.first, cls_and_code.second, std::move(ids));
+            return create_attachment_response_message(std::move(result),
+                                                      std::move(ids));
         }
 
         const std::vector<attachment_id>& attachment_ids() const EWS_NOEXCEPT
@@ -8822,9 +8876,9 @@ namespace internal
 
     private:
         create_attachment_response_message(
-            response_class cls, response_code code,
-            std::vector<attachment_id> attachment_ids)
-            : response_message_base(cls, code), ids_(std::move(attachment_ids))
+            response_result&& res, std::vector<attachment_id>&& attachment_ids)
+            : response_message_base(std::move(res)),
+              ids_(std::move(attachment_ids))
         {
         }
 
@@ -8844,7 +8898,7 @@ namespace internal
             EWS_ASSERT(elem &&
                        "Expected <GetAttachmentResponseMessage>, got nullptr");
 
-            const auto cls_and_code = parse_response_class_and_code(*elem);
+            auto result = parse_response_class_and_code(*elem);
 
             auto attachments_element = elem->first_node_ns(
                 uri<>::microsoft::messages(), "Attachments");
@@ -8857,8 +8911,7 @@ namespace internal
                 attachments.emplace_back(
                     attachment::from_xml_element(*attachment_elem));
             }
-            return get_attachment_response_message(cls_and_code.first,
-                                                   cls_and_code.second,
+            return get_attachment_response_message(std::move(result),
                                                    std::move(attachments));
         }
 
@@ -8868,9 +8921,9 @@ namespace internal
         }
 
     private:
-        get_attachment_response_message(response_class cls, response_code code,
-                                        std::vector<attachment> attachments)
-            : response_message_base(cls, code),
+        get_attachment_response_message(response_result&& res,
+                                        std::vector<attachment>&& attachments)
+            : response_message_base(std::move(res)),
               attachments_(std::move(attachments))
         {
         }
@@ -8889,13 +8942,13 @@ namespace internal
 
             EWS_ASSERT(elem &&
                        "Expected <SendItemResponseMessage>, got nullptr");
-            const auto result = parse_response_class_and_code(*elem);
-            return send_item_response_message(result.first, result.second);
+            auto result = parse_response_class_and_code(*elem);
+            return send_item_response_message(std::move(result));
         }
 
     private:
-        send_item_response_message(response_class cls, response_code code)
-            : response_message_base(cls, code)
+        explicit send_item_response_message(response_result&& res)
+            : response_message_base(std::move(res))
         {
         }
     };
@@ -8908,16 +8961,15 @@ namespace internal
             const auto doc = parse_response(std::move(response));
             auto elem = get_element_by_qname(*doc, "DeleteItemResponseMessage",
                                              uri<>::microsoft::messages());
-
+            auto result = parse_response_class_and_code(*elem);
             EWS_ASSERT(elem &&
                        "Expected <DeleteItemResponseMessage>, got nullptr");
-            const auto result = parse_response_class_and_code(*elem);
-            return delete_item_response_message(result.first, result.second);
+            return delete_item_response_message(std::move(result));
         }
 
     private:
-        delete_item_response_message(response_class cls, response_code code)
-            : response_message_base(cls, code)
+        explicit delete_item_response_message(response_result&& res)
+            : response_message_base(std::move(res))
         {
         }
     };
@@ -8937,7 +8989,7 @@ namespace internal
             EWS_ASSERT(
                 elem &&
                 "Expected <DeleteAttachmentResponseMessage>, got nullptr");
-            const auto cls_and_code = parse_response_class_and_code(*elem);
+            auto result = parse_response_class_and_code(*elem);
 
             auto root_item_id = item_id();
             auto root_item_id_elem =
@@ -8958,17 +9010,16 @@ namespace internal
                 root_item_id = item_id(std::move(id), std::move(change_key));
             }
 
-            return delete_attachment_response_message(
-                cls_and_code.first, cls_and_code.second, root_item_id);
+            return delete_attachment_response_message(std::move(result),
+                                                      std::move(root_item_id));
         }
 
         item_id get_root_item_id() const { return root_item_id_; }
 
     private:
-        delete_attachment_response_message(response_class cls,
-                                           response_code code,
-                                           item_id root_item_id)
-            : response_message_base(cls, code),
+        delete_attachment_response_message(response_result&& res,
+                                           item_id&& root_item_id)
+            : response_message_base(std::move(res)),
               root_item_id_(std::move(root_item_id))
         {
         }
@@ -16788,7 +16839,7 @@ public:
             delete_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
     }
 
@@ -16873,7 +16924,7 @@ public:
             create_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected a message item");
@@ -16907,7 +16958,7 @@ public:
             create_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
 
         if (disposition == message_disposition::save_only)
@@ -16949,7 +17000,7 @@ public:
             internal::send_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
     }
 
@@ -16969,7 +17020,7 @@ public:
             internal::find_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         return response_message.items();
     }
@@ -16995,10 +17046,11 @@ public:
 
         auto response = request(request_string);
         const auto response_message =
-            internal::find_calendar_item_response_message::parse(response);
+            internal::find_calendar_item_response_message::parse(
+                std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         return response_message.items();
     }
@@ -17033,7 +17085,7 @@ public:
             internal::find_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         return response_message.items();
     }
@@ -17064,7 +17116,7 @@ public:
             internal::update_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected at least one item");
@@ -17104,7 +17156,7 @@ public:
             internal::update_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected at least one item");
@@ -17132,7 +17184,7 @@ public:
             internal::add_delegate_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         return response_message.get_delegates();
     }
@@ -17153,7 +17205,7 @@ public:
             internal::get_delegate_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         return response_message.get_delegates();
     }
@@ -17178,7 +17230,7 @@ public:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
     }
 
@@ -17204,7 +17256,7 @@ public:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.attachment_ids().empty() &&
                    "Expected at least one attachment");
@@ -17250,7 +17302,7 @@ public:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.attachments().empty() &&
                    "Expected at least one attachment to be returned");
@@ -17273,7 +17325,7 @@ public:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         return response_message.get_root_item_id();
     }
@@ -17387,7 +17439,7 @@ private:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected at least one item");
@@ -17424,7 +17476,7 @@ private:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected at least one item");
@@ -17532,7 +17584,7 @@ private:
                 std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected at least one item");
@@ -17550,7 +17602,7 @@ private:
             create_item_response_message::parse(std::move(response));
         if (!response_message.success())
         {
-            throw exchange_error(response_message.get_response_code());
+            throw exchange_error(response_message.result());
         }
         EWS_ASSERT(!response_message.items().empty() &&
                    "Expected at least one item");
@@ -17601,7 +17653,7 @@ namespace internal
                                          uri<>::microsoft::messages());
 
         EWS_ASSERT(elem && "Expected <CreateItemResponseMessage>, got nullptr");
-        const auto result = parse_response_class_and_code(*elem);
+        auto result = parse_response_class_and_code(*elem);
         auto item_ids = std::vector<item_id>();
         auto items_elem =
             elem->first_node_ns(uri<>::microsoft::messages(), "Items");
@@ -17613,7 +17665,7 @@ namespace internal
                 EWS_ASSERT(item_id_elem && "Expected <ItemId> element");
                 item_ids.emplace_back(item_id::from_xml_element(*item_id_elem));
             });
-        return create_item_response_message(result.first, result.second,
+        return create_item_response_message(std::move(result),
                                             std::move(item_ids));
     }
 
@@ -17625,7 +17677,7 @@ namespace internal
                                          uri<>::microsoft::messages());
 
         EWS_ASSERT(elem && "Expected <FindItemResponseMessage>, got nullptr");
-        const auto result = parse_response_class_and_code(*elem);
+        auto result = parse_response_class_and_code(*elem);
 
         auto root_folder =
             elem->first_node_ns(uri<>::microsoft::messages(), "RootFolder");
@@ -17643,19 +17695,18 @@ namespace internal
             EWS_ASSERT(item_id_elem && "Expected <ItemId> element");
             items.emplace_back(item_id::from_xml_element(*item_id_elem));
         }
-        return find_item_response_message(result.first, result.second,
-                                          std::move(items));
+        return find_item_response_message(std::move(result), std::move(items));
     }
 
     inline find_calendar_item_response_message
-    find_calendar_item_response_message::parse(http_response& response)
+    find_calendar_item_response_message::parse(http_response&& response)
     {
         const auto doc = parse_response(std::move(response));
         auto elem = get_element_by_qname(*doc, "FindItemResponseMessage",
                                          uri<>::microsoft::messages());
 
         EWS_ASSERT(elem && "Expected <FindItemResponseMessage>, got nullptr");
-        const auto result = parse_response_class_and_code(*elem);
+        auto result = parse_response_class_and_code(*elem);
 
         auto root_folder =
             elem->first_node_ns(uri<>::microsoft::messages(), "RootFolder");
@@ -17669,7 +17720,7 @@ namespace internal
             *items_elem, [&items](const rapidxml::xml_node<>& item_elem) {
                 items.emplace_back(calendar_item::from_xml_element(item_elem));
             });
-        return find_calendar_item_response_message(result.first, result.second,
+        return find_calendar_item_response_message(std::move(result),
                                                    std::move(items));
     }
 
@@ -17681,7 +17732,7 @@ namespace internal
                                          uri<>::microsoft::messages());
 
         EWS_ASSERT(elem && "Expected <UpdateItemResponseMessage>, got nullptr");
-        const auto result = parse_response_class_and_code(*elem);
+        auto result = parse_response_class_and_code(*elem);
 
         auto items_elem =
             elem->first_node_ns(uri<>::microsoft::messages(), "Items");
@@ -17696,7 +17747,7 @@ namespace internal
             EWS_ASSERT(item_id_elem && "Expected <ItemId> element");
             items.emplace_back(item_id::from_xml_element(*item_id_elem));
         }
-        return update_item_response_message(result.first, result.second,
+        return update_item_response_message(std::move(result),
                                             std::move(items));
     }
 
@@ -17708,7 +17759,7 @@ namespace internal
         auto elem = get_element_by_qname(*doc, "GetItemResponseMessage",
                                          uri<>::microsoft::messages());
         EWS_ASSERT(elem && "Expected <GetItemResponseMessage>, got nullptr");
-        const auto result = parse_response_class_and_code(*elem);
+        auto result = parse_response_class_and_code(*elem);
         auto items_elem =
             elem->first_node_ns(uri<>::microsoft::messages(), "Items");
         EWS_ASSERT(items_elem && "Expected <Items> element");
@@ -17717,8 +17768,7 @@ namespace internal
             *items_elem, [&items](const rapidxml::xml_node<>& item_elem) {
                 items.emplace_back(ItemType::from_xml_element(item_elem));
             });
-        return get_item_response_message(result.first, result.second,
-                                         std::move(items));
+        return get_item_response_message(std::move(result), std::move(items));
     }
 
     template <typename ItemType>
@@ -17733,23 +17783,26 @@ namespace internal
                    "Expected <ResponseMessages> node, got nullptr");
 
         std::vector<get_item_response_messages::response_message> messages;
-        for_each_child_node(*response_messages, [&](const rapidxml::xml_node<>&
-                                                        response_message) {
-            auto result = parse_response_class_and_code(response_message);
+        for_each_child_node(
+            *response_messages,
+            [&](const rapidxml::xml_node<>& response_message) {
+                auto result = parse_response_class_and_code(response_message);
 
-            auto items_elem = response_message.first_node_ns(
-                uri<>::microsoft::messages(), "Items");
-            EWS_ASSERT(items_elem && "Expected <Items> element");
+                auto items_elem = response_message.first_node_ns(
+                    uri<>::microsoft::messages(), "Items");
+                EWS_ASSERT(items_elem && "Expected <Items> element");
 
-            auto items = std::vector<ItemType>();
-            for_each_child_node(
-                *items_elem, [&items](const rapidxml::xml_node<>& item_elem) {
-                    items.emplace_back(ItemType::from_xml_element(item_elem));
-                });
+                auto items = std::vector<ItemType>();
+                for_each_child_node(
+                    *items_elem,
+                    [&items](const rapidxml::xml_node<>& item_elem) {
+                        items.emplace_back(
+                            ItemType::from_xml_element(item_elem));
+                    });
 
-            messages.emplace_back(
-                std::make_tuple(result.first, result.second, std::move(items)));
-        });
+                messages.emplace_back(
+                    std::make_tuple(result.cls, result.code, std::move(items)));
+            });
 
         return get_item_response_messages(std::move(messages));
     }
@@ -17795,15 +17848,15 @@ namespace internal
                                                   uri<>::microsoft::messages());
         EWS_ASSERT(response_elem &&
                    "Expected <m:AddDelegateResponse>, got nullptr");
-        const auto cls_and_code = parse_response_class_and_code(*response_elem);
+        auto result = parse_response_class_and_code(*response_elem);
 
         std::vector<delegate_user> delegates;
-        if (cls_and_code.second == response_code::no_error)
+        if (result.code == response_code::no_error)
         {
             delegates = delegate_response_message::parse_users(*response_elem);
         }
-        return add_delegate_response_message(
-            cls_and_code.first, cls_and_code.second, std::move(delegates));
+        return add_delegate_response_message(std::move(result),
+                                             std::move(delegates));
     }
 
     inline get_delegate_response_message
@@ -17814,15 +17867,85 @@ namespace internal
                                                   uri<>::microsoft::messages());
         EWS_ASSERT(response_elem &&
                    "Expected <GetDelegateResponse>, got nullptr");
-        const auto cls_and_code = parse_response_class_and_code(*response_elem);
+        auto result = parse_response_class_and_code(*response_elem);
 
         std::vector<delegate_user> delegates;
-        if (cls_and_code.second == response_code::no_error)
+        if (result.code == response_code::no_error)
         {
             delegates = delegate_response_message::parse_users(*response_elem);
         }
-        return get_delegate_response_message(
-            cls_and_code.first, cls_and_code.second, std::move(delegates));
+        return get_delegate_response_message(std::move(result),
+                                             std::move(delegates));
+    }
+
+    inline remove_delegate_response_message
+    remove_delegate_response_message::parse(http_response&& response)
+    {
+        const auto doc = parse_response(std::move(response));
+        auto resp = get_element_by_qname(*doc, "RemoveDelegateResponse",
+                                         uri<>::microsoft::messages());
+        EWS_ASSERT(resp && "Expected <RemoveDelegateResponse>, got nullptr");
+
+        auto result = parse_response_class_and_code(*resp);
+        if (result.code == response_code::no_error)
+        {
+            // We still need to check each individual element in
+            // <ResponseMessages> for errors ¯\_(⊙︿⊙)_/¯
+
+            using rapidxml::internal::compare;
+
+            for_each_child_node(*resp, [](const rapidxml::xml_node<>& elem) {
+
+                if (compare(elem.local_name(), elem.local_name_size(),
+                            "ResponseMessages",
+                            std::strlen("ResponseMessages")))
+                {
+                    for_each_child_node(
+                        elem, [](const rapidxml::xml_node<>& msg) {
+
+                            auto response_class_attr =
+                                msg.first_attribute("ResponseClass");
+                            if (compare(response_class_attr->value(),
+                                        response_class_attr->value_size(),
+                                        "Error", 5))
+                            {
+                                // Okay, we got an error. Additional
+                                // context about the error might be
+                                // available in <m:MessageText>. Throw
+                                // directly from here.
+
+                                auto code = response_code::no_error;
+
+                                auto rcode_elem = msg.first_node_ns(
+                                    uri<>::microsoft::messages(),
+                                    "ResponseCode");
+                                EWS_ASSERT(rcode_elem &&
+                                           "Expected <ResponseCode> element");
+                                code =
+                                    str_to_response_code(rcode_elem->value());
+
+                                auto message_text = msg.first_node_ns(
+                                    uri<>::microsoft::messages(),
+                                    "MessageText");
+
+                                if (message_text)
+                                {
+                                    throw exchange_error(
+                                        code, std::string(
+                                                  message_text->value(),
+                                                  message_text->value_size()));
+                                }
+
+                                throw exchange_error(code);
+                            }
+
+                        });
+                }
+
+            });
+        }
+
+        return remove_delegate_response_message(std::move(result));
     }
 }
 
