@@ -8191,7 +8191,9 @@ class distinguished_folder_id final : public folder_id
 {
 public:
 #ifdef EWS_HAS_DEFAULT_AND_DELETE
-    distinguished_folder_id() = delete;
+    distinguished_folder_id() = default;
+#else
+    distinguished_folder_id() : folder_id() {}
 #endif
 
     //! \brief Creates a <tt>\<DistinguishedFolderId></tt> element for a given
@@ -8605,7 +8607,7 @@ private:
 };
 
 #ifdef EWS_HAS_NON_BUGGY_TYPE_TRAITS
-static_assert(!std::is_default_constructible<distinguished_folder_id>::value,
+static_assert(std::is_default_constructible<distinguished_folder_id>::value,
               "");
 static_assert(std::is_copy_constructible<distinguished_folder_id>::value, "");
 static_assert(std::is_copy_assignable<distinguished_folder_id>::value, "");
